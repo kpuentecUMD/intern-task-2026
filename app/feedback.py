@@ -2,7 +2,7 @@
 
 import json
 
-from openai import AsyncOpenAI
+import anthropic
 
 from app.models import FeedbackRequest, FeedbackResponse
 
@@ -26,7 +26,9 @@ sentence (vocabulary, grammar structures used), NOT based on whether it has erro
 learner's original meaning and style as much as possible.
 6. Explanations should be concise (1–2 sentences), friendly, and educational.
 
-Respond with valid JSON matching this exact schema:
+
+Respond with valid JSON and nothing else, no explanation.
+The JSON matching this exact schema:
 {
   "corrected_sentence": "string",
   "is_correct": boolean,
@@ -44,7 +46,7 @@ Respond with valid JSON matching this exact schema:
 
 
 async def get_feedback(request: FeedbackRequest) -> FeedbackResponse:
-    client = AsyncOpenAI()
+    client = anthropic.AsyncAnthropic()
 
     user_message = (
         f"Target language: {request.target_language}\n"
@@ -52,16 +54,20 @@ async def get_feedback(request: FeedbackRequest) -> FeedbackResponse:
         f"Sentence: {request.sentence}"
     )
 
-    response = await client.chat.completions.create(
-        model="gpt-4o-mini",
+    response = await client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=1024,
+        system=SYSTEM_PROMPT,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_message},
         ],
-        response_format={"type": "json_object"},
         temperature=0.2,
     )
 
-    content = response.choices[0].message.content
+    content = response.content[0].text.strip() 
+    if content.startswith("```"):
+        content = content.split("```")[1]
+        if content.startswith("json"):
+            content = content[4:]
     data = json.loads(content)
     return FeedbackResponse(**data)
