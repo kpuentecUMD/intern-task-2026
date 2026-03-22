@@ -16,6 +16,7 @@ _cache: dict[str, FeedbackResponse] = {}
 
 
 def _cache_key(request: FeedbackRequest) -> str:
+    # normalize input so "Yo fui" and "yo fui" hit the same cache entry
     raw = f"{request.sentence.strip().lower()}|{request.target_language.lower()}|{request.native_language.lower()}"
     return md5(raw.encode()).hexdigest()
 
@@ -95,20 +96,21 @@ Use this exact schema:
 
 
 async def get_feedback(request: FeedbackRequest) -> FeedbackResponse:
-    # check cache first
+    # return cached result if we've seen this exact request before
     key = _cache_key(request)
     if key in _cache:
-        logger.info("Cache hit for request")
+        logger.info("cache hit for request")
         return _cache[key]
 
+    # build the user message with all context the model needs
     client = anthropic.AsyncAnthropic()
-
     user_message = (
         f"Target language: {request.target_language}\n"
         f"Native language: {request.native_language}\n"
         f"Sentence: {request.sentence}"
     )
 
+    # call the model, handle all failure modes explicitly
     try:
         response = await client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -120,18 +122,19 @@ async def get_feedback(request: FeedbackRequest) -> FeedbackResponse:
             temperature=0.2,
         )
     except anthropic.AuthenticationError:
-        logger.error("Invalid Anthropic API key")
+        logger.error("invalid anthropic api key")
         raise HTTPException(status_code=500, detail="API authentication failed")
     except anthropic.RateLimitError:
-        logger.error("Anthropic rate limit hit")
+        logger.error("anthropic rate limit hit")
         raise HTTPException(status_code=429, detail="Rate limit exceeded, try again later")
     except anthropic.APIConnectionError:
-        logger.error("Could not connect to Anthropic API")
+        logger.error("could not connect to anthropic api")
         raise HTTPException(status_code=503, detail="Could not connect to AI service")
     except anthropic.APIStatusError as e:
-        logger.error(f"Anthropic API error: {e.status_code} {e.message}")
+        logger.error(f"anthropic api error: {e.status_code} {e.message}")
         raise HTTPException(status_code=502, detail="AI service returned an error")
 
+    # parse the response, stripping markdown fences if the model added them
     try:
         content = response.content[0].text.strip()
         if content.startswith("```"):
@@ -140,9 +143,10 @@ async def get_feedback(request: FeedbackRequest) -> FeedbackResponse:
                 content = content[4:]
         data = json.loads(content)
         result = FeedbackResponse(**data)
+        # store in cache for next time
         _cache[key] = result
-        logger.info("Cache miss, stored new result")
+        logger.info("cache miss, stored new result")
         return result
     except (json.JSONDecodeError, KeyError, ValueError) as e:
-        logger.error(f"Failed to parse model response: {e}\nRaw content: {content}")
+        logger.error(f"failed to parse model response: {e}\nraw content: {content}")
         raise HTTPException(status_code=500, detail="Failed to parse AI response")
