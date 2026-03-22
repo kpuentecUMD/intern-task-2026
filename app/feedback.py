@@ -1,10 +1,14 @@
 """System prompt and LLM interaction for language feedback."""
 
 import json
+import logging
 
 import anthropic
+from fastapi import HTTPException
 
 from app.models import FeedbackRequest, FeedbackResponse
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
 You are an expert language tutor embedded in a language learning app. \
@@ -89,20 +93,37 @@ async def get_feedback(request: FeedbackRequest) -> FeedbackResponse:
         f"Sentence: {request.sentence}"
     )
 
-    response = await client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=1024,
-        system=SYSTEM_PROMPT,
-        messages=[
-            {"role": "user", "content": user_message},
-        ],
-        temperature=0.2,
-    )
+    try:
+        response = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            system=SYSTEM_PROMPT,
+            messages=[
+                {"role": "user", "content": user_message},
+            ],
+            temperature=0.2,
+        )
+    except anthropic.AuthenticationError:
+        logger.error("Invalid Anthropic API key")
+        raise HTTPException(status_code=500, detail="API authentication failed")
+    except anthropic.RateLimitError:
+        logger.error("Anthropic rate limit hit")
+        raise HTTPException(status_code=429, detail="Rate limit exceeded, try again later")
+    except anthropic.APIConnectionError:
+        logger.error("Could not connect to Anthropic API")
+        raise HTTPException(status_code=503, detail="Could not connect to AI service")
+    except anthropic.APIStatusError as e:
+        logger.error(f"Anthropic API error: {e.status_code} {e.message}")
+        raise HTTPException(status_code=502, detail="AI service returned an error")
 
-    content = response.content[0].text.strip() 
-    if content.startswith("```"):
-        content = content.split("```")[1]
-        if content.startswith("json"):
-            content = content[4:]
-    data = json.loads(content)
-    return FeedbackResponse(**data)
+    try:
+        content = response.content[0].text.strip()
+        if content.startswith("```"):
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+        data = json.loads(content)
+        return FeedbackResponse(**data)
+    except (json.JSONDecodeError, KeyError, ValueError) as e:
+        logger.error(f"Failed to parse model response: {e}\nRaw content: {content}")
+        raise HTTPException(status_code=500, detail="Failed to parse AI response")
