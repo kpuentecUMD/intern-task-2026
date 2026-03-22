@@ -2,6 +2,7 @@
 
 import json
 import logging
+from hashlib import md5
 
 import anthropic
 from fastapi import HTTPException
@@ -9,6 +10,15 @@ from fastapi import HTTPException
 from app.models import FeedbackRequest, FeedbackResponse
 
 logger = logging.getLogger(__name__)
+
+# simple in-memory cache. key = hash of (sentence + target_language + native_language)
+_cache: dict[str, FeedbackResponse] = {}
+
+
+def _cache_key(request: FeedbackRequest) -> str:
+    raw = f"{request.sentence.strip().lower()}|{request.target_language.lower()}|{request.native_language.lower()}"
+    return md5(raw.encode()).hexdigest()
+
 
 SYSTEM_PROMPT = """\
 You are an expert language tutor embedded in a language learning app. \
@@ -85,6 +95,12 @@ Use this exact schema:
 
 
 async def get_feedback(request: FeedbackRequest) -> FeedbackResponse:
+    # check cache first
+    key = _cache_key(request)
+    if key in _cache:
+        logger.info("Cache hit for request")
+        return _cache[key]
+
     client = anthropic.AsyncAnthropic()
 
     user_message = (
@@ -123,7 +139,10 @@ async def get_feedback(request: FeedbackRequest) -> FeedbackResponse:
             if content.startswith("json"):
                 content = content[4:]
         data = json.loads(content)
-        return FeedbackResponse(**data)
+        result = FeedbackResponse(**data)
+        _cache[key] = result
+        logger.info("Cache miss, stored new result")
+        return result
     except (json.JSONDecodeError, KeyError, ValueError) as e:
         logger.error(f"Failed to parse model response: {e}\nRaw content: {content}")
         raise HTTPException(status_code=500, detail="Failed to parse AI response")
